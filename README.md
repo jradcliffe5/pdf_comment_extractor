@@ -78,5 +78,5 @@ Field | Description
 
 ## License
 
-MIT (supply your chosen license details here).
+GNU General Public License-3.0.
 
