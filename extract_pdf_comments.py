@@ -12,11 +12,12 @@ Requires: PyMuPDF (fitz)
 import argparse
 import csv
 import json
+import re
 import sys
 import textwrap
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, cast
 
 import fitz  # PyMuPDF
 
@@ -31,7 +32,7 @@ class LineInfo:
 
 @dataclass
 class AnnotRecord:
-    page: int  # 1-based
+    page: Optional[int]  # 1-based in PDF; None for manual entries
     type: str
     author: Optional[str]
     comment_text: Optional[str]
@@ -39,6 +40,22 @@ class AnnotRecord:
     line_number: Optional[int]
     context_line_text: Optional[str]
     bbox: Tuple[float, float, float, float]
+
+
+def _page_get_text(page: fitz.Page, mode: str, **kwargs: Any) -> Any:
+    """Compatibility wrapper for Page.get_text across PyMuPDF versions."""
+    page_any = cast(Any, page)
+    if hasattr(page_any, "get_text"):
+        return page_any.get_text(mode, **kwargs)
+
+    clip = kwargs.get("clip")
+    textpage = page.get_textpage(clip=clip)
+    mode_lower = mode.lower()
+    if mode_lower == "dict":
+        return textpage.extractDICT()
+    if mode_lower == "text":
+        return textpage.extractTEXT()
+    raise ValueError(f"Unsupported text extraction mode: {mode}")
 
 
 def _flatten_lines(page: fitz.Page) -> List[LineInfo]:
@@ -49,7 +66,7 @@ def _flatten_lines(page: fitz.Page) -> List[LineInfo]:
     Attempts to detect explicit line numbers printed in the PDF so we can
     propagate those instead of synthetic ordering when possible.
     """
-    raw = page.get_text("dict")
+    raw = _page_get_text(page, "dict")
     lines: List[LineInfo] = []
     markers: List[Tuple[float, int]] = []  # (vertical center, line number)
     # We'll remap explicit line-number-only blocks onto nearby text lines.
@@ -234,7 +251,7 @@ def _extract_quoted_text_for_quads(page: fitz.Page, quads: List[fitz.Quad]) -> s
     snippets = []
     for q in quads:
         r = q.rect
-        t = page.get_text("text", clip=r)  # raw text within the clip
+        t = _page_get_text(page, "text", clip=r)  # raw text within the clip
         t = " ".join(t.split())
         if t:
             snippets.append(t)
@@ -293,7 +310,7 @@ def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
                     quoted_text = _extract_quoted_text_for_quads(page, quads)
                 else:
                     # fallback to rect clip
-                    qt = page.get_text("text", clip=rect)
+                    qt = _page_get_text(page, "text", clip=rect)
                     quoted_text = " ".join(qt.split()) if qt else None
 
             # Find best-matching line for the annotation rectangle
@@ -355,7 +372,9 @@ def _quote_for_display(text: str) -> str:
 
 
 def _report_line_for_record(record: AnnotRecord) -> str:
-    location_parts = [f"Page {record.page}"]
+    location_parts: List[str] = []
+    if record.page is not None:
+        location_parts.append(f"Page {record.page}")
     if record.line_number is not None:
         location_parts.append(f"line {record.line_number}")
     location = ", ".join(location_parts)
@@ -394,6 +413,8 @@ def _report_line_for_record(record: AnnotRecord) -> str:
         body = f"Reconsider {quote_display}"
         if comment:
             body = f"{body}: {comment}"
+    elif annot_type == "Manual":
+        body = comment or context or "(No annotation text)"
     elif annot_type == "Caret":
         if comment:
             body = f"Insert {_quote_for_display(comment)}"
@@ -421,7 +442,7 @@ def _report_line_for_record(record: AnnotRecord) -> str:
 
     body = body.strip()
 
-    return f"{location}: {body}"
+    return f"{location}: {body}" if location else body
 
 
 def write_text_report(path: Optional[str], records: List[AnnotRecord]) -> None:
@@ -430,12 +451,87 @@ def write_text_report(path: Optional[str], records: List[AnnotRecord]) -> None:
 
     if path:
         with open(path, "w", encoding="utf-8") as f:
-            for line in lines:
-                f.write(line)
+            if lines:
+                f.write("\n\n".join(lines))
                 f.write("\n")
     else:
-        for line in lines:
+        for idx, line in enumerate(lines):
+            if idx:
+                sys.stdout.write("\n")
             sys.stdout.write(f"{line}\n")
+
+
+def _split_manual_blocks(text: str) -> List[List[str]]:
+    blocks: List[List[str]] = []
+    current: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.strip():
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def load_manual_comments(paths: List[str]) -> List[AnnotRecord]:
+    manual_records: List[AnnotRecord] = []
+    pattern = re.compile(r"^Page\s+(\d+)(?:\s*,?\s*line\s+(\d+))?\s*:\s*(.*)$", re.IGNORECASE)
+
+    for manual_path in paths:
+        path = Path(manual_path)
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            print(f"Warning: manual comment file not found: {manual_path}", file=sys.stderr)
+            continue
+        except OSError as exc:
+            print(f"Warning: could not read manual comment file {manual_path}: {exc}", file=sys.stderr)
+            continue
+
+        for block in _split_manual_blocks(content):
+            if not block:
+                continue
+
+            first = block[0].strip()
+            page: Optional[int] = None
+            line_number: Optional[int] = None
+            body_parts: List[str]
+
+            match = pattern.match(first)
+            if match:
+                page = int(match.group(1))
+                if match.group(2):
+                    line_number = int(match.group(2))
+                first_body = match.group(3).strip()
+                remaining = block[1:]
+                if first_body:
+                    body_parts = [first_body, *remaining]
+                else:
+                    body_parts = remaining
+            else:
+                body_parts = block
+
+            comment_text = " ".join(part.strip() for part in body_parts if part.strip())
+            if not comment_text:
+                continue
+
+            manual_records.append(
+                AnnotRecord(
+                    page=page,
+                    type="Manual",
+                    author=None,
+                    comment_text=comment_text,
+                    quoted_text=None,
+                    line_number=line_number,
+                    context_line_text=comment_text,
+                    bbox=(0.0, 0.0, 0.0, 0.0),
+                )
+            )
+
+    return manual_records
 
 
 def _auto_output_path(pdf_path: str, kind: str) -> Path:
@@ -457,6 +553,7 @@ def main():
           python extract_pdf_comments.py input.pdf -o comments.csv
           python extract_pdf_comments.py input.pdf --json -o comments.json
           python extract_pdf_comments.py input.pdf --text-report -o report.txt
+          python extract_pdf_comments.py input.pdf --text-report --manual-text notes.txt
           python extract_pdf_comments.py input.pdf > comments.csv
         """
     )
@@ -468,6 +565,14 @@ def main():
     )
     ap.add_argument("pdf", help="Input PDF file")
     ap.add_argument("-o", "--output", help="Output file path (default: stdout CSV)", default=None)
+    ap.add_argument(
+        "--manual-text",
+        metavar="PATH",
+        action="append",
+        default=[],
+        help="Add manual comments from text files; repeat to include multiple files."
+        " Each block separated by blank lines becomes a manual annotation.",
+    )
     format_group = ap.add_mutually_exclusive_group()
     format_group.add_argument("--json", action="store_true", help="Write JSON instead of CSV")
     format_group.add_argument(
@@ -478,7 +583,13 @@ def main():
     args = ap.parse_args()
 
     doc = fitz.open(args.pdf)
-    records = extract_annotations(doc)
+    pdf_records = extract_annotations(doc)
+
+    manual_records: List[AnnotRecord] = []
+    if args.manual_text:
+        manual_records = load_manual_comments(args.manual_text)
+
+    records = manual_records + pdf_records
 
     if args.text_report:
         if args.output:
