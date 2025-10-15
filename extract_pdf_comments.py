@@ -244,26 +244,115 @@ def _extract_author(annot: fitz.Annot) -> Optional[str]:
     return author if author else None
 
 
+def _strip_margin_numbers(text: str) -> str:
+    """
+    Remove standalone page/line numbers that often get captured at the edges of highlights.
+    Only trims numeric tokens at the boundaries so inline numeric content is preserved.
+    """
+
+    def is_margin_number(token: str) -> bool:
+        stripped = token.strip("()[]:;,.")
+        if not stripped:
+            return False
+        if stripped.isdigit():
+            return True
+        if "-" in stripped:
+            parts = stripped.split("-")
+            if all(part.isdigit() for part in parts if part):
+                return True
+        return False
+
+    tokens = text.split()
+    start = 0
+    end = len(tokens)
+
+    while start < end and is_margin_number(tokens[start]):
+        start += 1
+    while end > start and is_margin_number(tokens[end - 1]):
+        end -= 1
+
+    cleaned = tokens[start:end]
+    return " ".join(cleaned)
+
+
+def _normalize_snippet(text: str) -> str:
+    """
+    Normalize raw text extracted from highlight regions:
+    - collapse line breaks,
+    - stitch hyphenated line breaks,
+    - strip stray margin numbers per line and at boundaries.
+    """
+    if not text:
+        return ""
+    cleaned = text.replace("\u00ad", "")  # soft hyphen
+    cleaned = cleaned.replace("\r\n", "\n")
+    # Drop standalone line/page numbers that sit on their own lines.
+    cleaned = re.sub(r"^\s*\d{1,4}\s*$", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", cleaned)
+    # Handle hyphenated breaks that had a numeric line number in between.
+    cleaned = re.sub(r"(\w)-\s*\n\s*\d{1,4}\s*\n\s*(\w)", r"\1\2", cleaned)
+
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    filtered: List[str] = []
+    for line in lines:
+        if re.fullmatch(r"\d{1,4}", line):
+            continue
+        filtered.append(line)
+
+    segments: List[str] = []
+    carry: Optional[str] = None
+    pending_symbols: List[str] = []
+    for line in filtered:
+        if carry is not None:
+            if re.fullmatch(r"[^\w]+", line):
+                pending_symbols.append(line)
+                continue
+            line = carry + line
+            carry = None
+        if line.endswith("-"):
+            carry = line[:-1]
+            continue
+        if re.fullmatch(r"[^\w]+", line):
+            segments.append(line)
+            continue
+        segments.append(line)
+        if pending_symbols:
+            segments.extend(pending_symbols)
+            pending_symbols.clear()
+    if carry:
+        segments.append(carry)
+    if pending_symbols:
+        segments.extend(pending_symbols)
+
+    cleaned = " ".join(segments)
+    cleaned = " ".join(cleaned.split())
+    cleaned = _strip_margin_numbers(cleaned)
+    return cleaned
+
+
 def _extract_quoted_text_for_quads(page: fitz.Page, quads: List[fitz.Quad]) -> str:
     """
     For highlight/underline/etc., extract the text under each quad and join.
     """
-    snippets = []
+    raw_snippets = []
     for q in quads:
         r = q.rect
         t = _page_get_text(page, "text", clip=r)  # raw text within the clip
-        t = " ".join(t.split())
-        if t:
-            snippets.append(t)
+        if not t:
+            continue
+        t = t.strip()
+        if not t:
+            continue
+        raw_snippets.append(t)
     # Deduplicate while keeping order
-    # Highlights often produce duplicate spans for overlapping quads.
     seen = set()
-    uniq = []
-    for s in snippets:
-        if s not in seen:
-            uniq.append(s)
-            seen.add(s)
-    return " / ".join(uniq)
+    ordered: List[str] = []
+    for snippet in raw_snippets:
+        if snippet not in seen:
+            ordered.append(snippet)
+            seen.add(snippet)
+    combined = "\n".join(ordered)
+    return _normalize_snippet(combined)
 
 
 def _quads_from_annot(annot: fitz.Annot) -> List[fitz.Quad]:
@@ -311,7 +400,11 @@ def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
                 else:
                     # fallback to rect clip
                     qt = _page_get_text(page, "text", clip=rect)
-                    quoted_text = " ".join(qt.split()) if qt else None
+                    if qt:
+                        qt_norm = _normalize_snippet(qt)
+                        quoted_text = qt_norm if qt_norm else None
+                    else:
+                        quoted_text = None
 
             # Find best-matching line for the annotation rectangle
             best_line = _best_line_for_rect(lines, rect) if lines else None
