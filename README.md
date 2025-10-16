@@ -11,6 +11,12 @@
 - Automatically chooses an output filename when `-o/--output` is omitted, printing where the file was written.
 - Supports PyMuPDF-compatible PDFs (`pip install pymupdf`).
 
+## Requirements
+
+- Python 3.8 or newer.
+- [`pymupdf`](https://pypi.org/project/PyMuPDF/) (install via `pip install pymupdf`).
+- PDFs with text that PyMuPDF can extract (scanned images without OCR will not work).
+
 ## Installation
 
 ```bash
@@ -32,6 +38,18 @@ Options:
 - `--text-report` – Produce a plain-text referee report (one annotation per line).
 - `--manual-text PATH` – Append manual comments loaded from a text file. Repeat to include multiple files.
 - Omitting both `--json` and `--text-report` defaults to CSV output.
+
+### Output formats
+
+- **CSV** (default): column-friendly layout with coordinates and context.
+- **JSON** (`--json`): machine-readable with full metadata; pretty-printed by default.
+- **Text report** (`--text-report`): reviewer prose, one annotation per paragraph.
+
+If no output path is supplied, the script auto-names the file next to the PDF:
+
+- `<pdf_name>_comments.csv`
+- `<pdf_name>_comments.json`
+- `<pdf_name>_report.txt`
 
 ### Examples
 
@@ -67,6 +85,7 @@ Double-check the appendix: numbering resets unexpectedly.
 - The `Page ... line ...:` prefix (case insensitive) is stripped from the output and used to tag the note with a location.
 - Lines inside a block are concatenated with spaces; keep separate thoughts in separate blocks.
 - Manual comments appear before PDF-derived annotations in the text report, with a blank line between entries for readability.
+- A block without a `Page ... line ...:` header still becomes a manual annotation; it will simply omit that location metadata.
 
 ## Text report format
 
@@ -96,6 +115,12 @@ Field | Description
 - Requires PyMuPDF (`fitz`) and PDFs with extractable text.
 - Line-number detection depends on numbers being present in the margin.
 - Ink/stamp annotations are recorded but not converted into bespoke prose.
+- Bounding boxes use PDF coordinate space (origin bottom-left); conversions to other systems must be handled externally.
+
+## Development notes
+
+- The codebase favours lightweight functions with docstrings for quick navigation.
+- Formatting and linting follow the standard library style; `black` with the default profile keeps the script consistent.
 
 ## License
 

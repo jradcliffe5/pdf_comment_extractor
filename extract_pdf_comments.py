@@ -24,6 +24,7 @@ import fitz  # PyMuPDF
 
 @dataclass
 class LineInfo:
+    """Normalized page line metadata used to align annotations with text rows."""
     idx: int  # 1-based line number on the page (fallback ordering)
     bbox: Tuple[float, float, float, float]  # (x0, y0, x1, y1)
     text: str
@@ -32,6 +33,7 @@ class LineInfo:
 
 @dataclass
 class AnnotRecord:
+    """Portable representation of an annotation suitable for CSV/JSON serialization."""
     page: Optional[int]  # 1-based in PDF; None for manual entries
     type: str
     author: Optional[str]
@@ -235,7 +237,7 @@ def _extract_popup_text(annot: fitz.Annot) -> Optional[str]:
 
 
 def _extract_author(annot: fitz.Annot) -> Optional[str]:
-    # Pull author from either title or name metadata.
+    """Pull a cleaned author name from annotation metadata when available."""
     info = annot.info or {}
     author = info.get("title") or info.get("name")
     if not author:
@@ -375,6 +377,7 @@ def _quads_from_annot(annot: fitz.Annot) -> List[fitz.Quad]:
 
 
 def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
+    """Walk every page in the document and collect normalized annotation metadata."""
     records: List[AnnotRecord] = []
 
     for pno in range(doc.page_count):
@@ -432,6 +435,7 @@ def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
 
 
 def write_csv(path: str, records: List[AnnotRecord]) -> None:
+    """Write annotation records to a CSV file with a consistent column order."""
     fieldnames = [
         "page",
         "type",
@@ -454,17 +458,20 @@ def write_csv(path: str, records: List[AnnotRecord]) -> None:
 
 
 def write_json(path: str, records: List[AnnotRecord]) -> None:
+    """Serialize annotation records as JSON to the given path."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump([asdict(r) for r in records], f, ensure_ascii=False, indent=2)
 
 
 def _quote_for_display(text: str) -> str:
+    """Return a deterministic single-quoted version of the provided snippet."""
     # Quote text in a stable way for single-line referee bullets.
     sanitized = text.replace('"', "'")
     return f'"{sanitized}"'
 
 
 def _report_line_for_record(record: AnnotRecord) -> str:
+    """Format an annotation as a one-line referee-style summary."""
     location_parts: List[str] = []
     if record.page is not None:
         location_parts.append(f"Page {record.page}")
@@ -539,6 +546,7 @@ def _report_line_for_record(record: AnnotRecord) -> str:
 
 
 def write_text_report(path: Optional[str], records: List[AnnotRecord]) -> None:
+    """Emit a plain-text report where each annotation occupies its own paragraph."""
     # Collapse each annotation into a single referee-style line.
     lines = [_report_line_for_record(r) for r in records]
 
@@ -555,6 +563,7 @@ def write_text_report(path: Optional[str], records: List[AnnotRecord]) -> None:
 
 
 def _split_manual_blocks(text: str) -> List[List[str]]:
+    """Break free-form manual comments into paragraph blocks separated by blank lines."""
     blocks: List[List[str]] = []
     current: List[str] = []
     for raw_line in text.splitlines():
@@ -570,6 +579,7 @@ def _split_manual_blocks(text: str) -> List[List[str]]:
 
 
 def load_manual_comments(paths: List[str]) -> List[AnnotRecord]:
+    """Load manual annotations from external text files and adapt them to AnnotRecord."""
     manual_records: List[AnnotRecord] = []
     pattern = re.compile(r"^Page\s+(\d+)(?:\s*,?\s*line\s+(\d+))?\s*:\s*(.*)$", re.IGNORECASE)
 
@@ -628,6 +638,7 @@ def load_manual_comments(paths: List[str]) -> List[AnnotRecord]:
 
 
 def _auto_output_path(pdf_path: str, kind: str) -> Path:
+    """Derive a default output path next to the PDF for the requested format."""
     pdf = Path(pdf_path)
     stem = pdf.stem or "output"
     if kind == "json":
@@ -640,6 +651,7 @@ def _auto_output_path(pdf_path: str, kind: str) -> Path:
 
 
 def main():
+    """Parse CLI arguments and orchestrate extraction plus output generation."""
     usage_examples = textwrap.dedent(
         """\
         Examples:
