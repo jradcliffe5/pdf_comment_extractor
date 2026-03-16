@@ -40,6 +40,7 @@ class AnnotRecord:
     comment_text: Optional[str]
     quoted_text: Optional[str]
     line_number: Optional[int]
+    line_number_end: Optional[int]  # last line of a multi-line annotation; equals line_number for single-line
     context_line_text: Optional[str]
     bbox: Tuple[float, float, float, float]
 
@@ -194,6 +195,21 @@ def _best_line_for_rect(lines: List[LineInfo], rect: fitz.Rect) -> Optional[Line
             best = ln
 
     return best
+
+
+def _line_range_for_rect(lines: List[LineInfo], rect: fitz.Rect) -> Tuple[Optional[LineInfo], Optional[LineInfo]]:
+    """
+    Return the first and last lines (in reading order) that vertically overlap with rect.
+    Falls back to _best_line_for_rect when no overlap is found.
+    """
+    overlapping = [
+        ln for ln in lines
+        if max(0.0, min(rect.y1, ln.bbox[3]) - max(rect.y0, ln.bbox[1])) > 0
+    ]
+    if not overlapping:
+        best = _best_line_for_rect(lines, rect)
+        return best, best
+    return overlapping[0], overlapping[-1]
 
 
 def _annotation_type(annot: fitz.Annot) -> str:
@@ -409,13 +425,21 @@ def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
                     else:
                         quoted_text = None
 
-            # Find best-matching line for the annotation rectangle
-            best_line = _best_line_for_rect(lines, rect) if lines else None
-            if best_line:
-                line_num = best_line.pdf_number if best_line.pdf_number is not None else best_line.idx
+            # Find the range of lines covered by the annotation rectangle
+            if lines:
+                first_line, last_line = _line_range_for_rect(lines, rect)
+            else:
+                first_line = last_line = None
+
+            if first_line:
+                line_num = first_line.pdf_number if first_line.pdf_number is not None else first_line.idx
             else:
                 line_num = None
-            context_text = best_line.text if best_line else None
+            if last_line and last_line is not first_line:
+                line_num_end = last_line.pdf_number if last_line.pdf_number is not None else last_line.idx
+            else:
+                line_num_end = line_num
+            context_text = first_line.text if first_line else None
 
             rec = AnnotRecord(
                 page=pno + 1,
@@ -424,6 +448,7 @@ def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
                 comment_text=comment,
                 quoted_text=quoted_text,
                 line_number=line_num,
+                line_number_end=line_num_end,
                 context_line_text=context_text,
                 bbox=(float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)),
             )
@@ -443,6 +468,7 @@ def write_csv(path: str, records: List[AnnotRecord]) -> None:
         "comment_text",
         "quoted_text",
         "line_number",
+        "line_number_end",
         "context_line_text",
         "bbox",
     ]
@@ -476,7 +502,11 @@ def _report_line_for_record(record: AnnotRecord) -> str:
     if record.page is not None:
         location_parts.append(f"Page {record.page}")
     if record.line_number is not None:
-        location_parts.append(f"line {record.line_number}")
+        end = record.line_number_end
+        if end is not None and end != record.line_number:
+            location_parts.append(f"lines {record.line_number}-{end}")
+        else:
+            location_parts.append(f"line {record.line_number}")
     location = ", ".join(location_parts)
 
     def normalize(text: Optional[str]) -> str:
@@ -629,6 +659,7 @@ def load_manual_comments(paths: List[str]) -> List[AnnotRecord]:
                     comment_text=comment_text,
                     quoted_text=None,
                     line_number=line_number,
+                    line_number_end=line_number,
                     context_line_text=comment_text,
                     bbox=(0.0, 0.0, 0.0, 0.0),
                 )
