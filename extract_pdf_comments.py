@@ -392,6 +392,60 @@ def _quads_from_annot(annot: fitz.Annot) -> List[fitz.Quad]:
     return quads
 
 
+def _merge_strikeout_replacements(records: List[AnnotRecord]) -> List[AnnotRecord]:
+    """
+    Combine Strikeout + adjacent Text/Caret/FreeText pairs on the same page into a
+    single 'Replace' record.  Two annotations are considered paired when they share
+    the same page and their vertical centres are within two line-heights of each other.
+    """
+    used: set = set()
+    merged: List[AnnotRecord] = []
+
+    for i, rec in enumerate(records):
+        if i in used:
+            continue
+        if rec.type != "Strikeout":
+            merged.append(rec)
+            continue
+
+        rec_y_center = (rec.bbox[1] + rec.bbox[3]) / 2.0
+        line_height = max(rec.bbox[3] - rec.bbox[1], 12.0)
+
+        partner_idx = None
+        for j, other in enumerate(records):
+            if j in used or j == i:
+                continue
+            if other.page != rec.page:
+                continue
+            if other.type not in {"Text", "Caret", "FreeText"}:
+                continue
+            other_y_center = (other.bbox[1] + other.bbox[3]) / 2.0
+            if abs(rec_y_center - other_y_center) <= line_height * 2:
+                partner_idx = j
+                break
+
+        if partner_idx is not None:
+            partner = records[partner_idx]
+            used.add(i)
+            used.add(partner_idx)
+            replacement_text = partner.comment_text or partner.quoted_text
+            merged.append(AnnotRecord(
+                page=rec.page,
+                type="Replace",
+                author=rec.author or partner.author,
+                comment_text=replacement_text,
+                quoted_text=rec.quoted_text,
+                line_number=rec.line_number,
+                line_number_end=rec.line_number_end,
+                context_line_text=rec.context_line_text,
+                bbox=rec.bbox,
+            ))
+        else:
+            merged.append(rec)
+
+    return merged
+
+
 def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
     """Walk every page in the document and collect normalized annotation metadata."""
     records: List[AnnotRecord] = []
@@ -456,7 +510,7 @@ def extract_annotations(doc: fitz.Document) -> List[AnnotRecord]:
 
             annot = annot.next
 
-    return records
+    return _merge_strikeout_replacements(records)
 
 
 def write_csv(path: str, records: List[AnnotRecord]) -> None:
@@ -520,10 +574,20 @@ def _report_line_for_record(record: AnnotRecord) -> str:
     annot_type = record.type or "Annotation"
 
     body: str
-    if annot_type == "Strikeout" and quote:
-        body = f"Remove {quote_display}"
+    if annot_type == "Replace":
+        if quote and comment:
+            body = f"Replace {quote_display} with {_quote_for_display(comment)}"
+        elif quote:
+            body = f"Remove {quote_display}"
+        elif comment:
+            body = comment
+        else:
+            body = "(No annotation text)"
+    elif annot_type == "Strikeout" and quote:
         if comment:
-            body = f"{body}: {comment}"
+            body = f"Replace {quote_display} with {_quote_for_display(comment)}"
+        else:
+            body = f"Remove {quote_display}"
     elif annot_type == "Highlight":
         if comment:
             body = comment
